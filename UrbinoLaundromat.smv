@@ -1,0 +1,407 @@
+-- Linguaggi di programmazione e verifica del software
+-- Progetto sessione estiva 2019/2020
+-- Dalia Abbruciati, matricola 277914
+
+
+-- Ho modellato il programma in modo che ci siano:
+-- 2 lavatrici
+-- 2 stazioni
+-- 3 clienti
+
+  MODULE main
+
+    -- costante che indica il numero di lavatrici
+    DEFINE
+      NMACHINES := 2;
+
+    VAR
+      -- scheduler per l'asincronismo dei processi
+      scheduler : 0..2;
+      -- lavatrici
+      wm0 : washing_machine (0, central_pc);
+      wm1 : washing_machine (1, central_pc);
+      -- clienti
+      c0 : customer (0, scheduler, st0, st1);
+      c1 : customer (1, scheduler, st0, st1);
+      c2 : customer (2, scheduler, st0, st1);
+      -- stazioni
+      st0 : station (0, NMACHINES, scheduler, c0, c1, c2, central_pc);
+      st1 : station (1, NMACHINES, scheduler, c0, c1, c2, central_pc);
+      -- computer centrale
+      central_pc : central_computer (2, NMACHINES, scheduler, st0, st1, wm0, wm1);
+      
+
+    ASSIGN
+      next(scheduler) := {0..2};
+
+    -- Lo scheduler sceglie in maniera equa
+    JUSTICE(scheduler = 0);
+    JUSTICE(scheduler = 1);
+    JUSTICE(scheduler = 2);
+
+--------------------------------------------PROPRIETÀ-------------------------------------------------
+
+-- 0) Verifica la presenza di deadlock nel semaforo "nfree"
+--    TRUE
+      CTLSPEC
+      !EF (AG (st0.pc = sem & st1.pc = sem));
+
+-- 1) Verifica che entrambe le stazioni portino a termine la loro esecuzione
+--    TRUE
+      CTLSPEC
+      AG ((st0.pc = sem) -> EF(st0.pc = end) & (st1.pc = sem) -> EF(st1.pc = end));
+
+-- 2) Verifica che tutti i clienti portino a termine la loro esecuzione
+--    TRUE
+      CTLSPEC
+      EF (c0.state = out & c1.state = out & c2.state = out);
+
+-- 3) Verifica che i clienti possano usare le lavatrici contemporaneamente
+--    FALSE
+      CTLSPEC
+      EF ((c0.state = wash_laundry) & (c1.state = wash_laundry) & (c2.state = wash_laundry)); 
+
+-- 4) Verifica che le due stazioni possano lavorare contemporanemente
+--    TRUE
+      CTLSPEC
+      EF (st0.pc != start & st1.pc != start);
+
+-- 5) Verifica che un cliente, una volta ottenuto il token, riesca, prima o poi, a lavare la biancheria
+--    TRUE    
+      CTLSPEC
+      EF ((c2.state = get_token) -> EF(c2.state = wash_laundry));
+
+
+
+
+--------------------------------------MODULE WASHING MACHINE---------------------------------------------
+
+-- Le lavatrici rimangono nello stato "wait", finchè le loro celle corrispondenti
+-- nell'array available[] sono settate a TRUE (disponibili).
+-- Una volta che sono state allocate dal computer centrale, il valore delle celle passa a FALSE (occupate)
+-- e iniziano a compiere il ciclo di lavaggio.
+-- Sarà compito del computer centrale rilasciare l'allocazione e rendere di nuovo libere le lavatrici.
+
+
+  MODULE washing_machine(id, central_pc)
+
+    VAR
+      -- program counter delle lavatrici
+      pc: {start, wait, washing, end};
+
+    ASSIGN
+    
+      init(pc) := start;
+      next(pc) :=
+      case 
+          -- se la lavatrice wm0 è disponibile, passa allo stato "wait"
+          (id = 0) & (pc = start) & (central_pc.available[0])      : wait;
+          -- se la lavatrice wm1 è disponibile, passa allo stato "wait"
+          (id = 1) & (pc = start) & (central_pc.available[1])      : wait;
+          -- se la lavatrice wm0 NON è disponibile, passo allo stato "washing"
+          (id = 0) & (pc = wait) & (!central_pc.available[0])      : washing;
+          -- se la lavatrice wm1 NON è disponibile, passo allo stato "washing"
+          (id = 1) & (pc = wait) & (!central_pc.available[1])      : washing;
+          -- se la lavatrice wm0 è nello stato "washing", passa allo stato "end"
+          (id = 0) & (pc = washing)                                : end;
+          -- se la lavatrice wm1 è nello stato "washing", passa allo stato "end"
+          (id = 1) & (pc = washing)                                : end;
+          -- se la lavatrice wm0 è disponibile e sono nello stato "end", ritorno allo stato di attesa
+          (id = 0) & (pc = end) & (central_pc.available[0])        : wait;
+          -- se la lavatrice wm1 è disponibile e sono nello stato "end", ritorno allo stato di attesa
+          (id = 1) & (pc = end) & (central_pc.available[1])        : wait;
+          TRUE                                                     : pc;
+      esac;
+
+
+
+--------------------------------------MODULE CUSTOMER---------------------------------------------
+
+-- Il cliente entra nel negozio e controlla se ci sono stazioni disponibili,
+-- in tal caso sceglie la stazione e attende che essa gli dia il token per poter lavare la biancheria.
+-- Finito il lavaggio libererà la lavatrice e uscirà dal negozio.
+
+-- modulo dei clienti
+  MODULE customer(id, scheduler, st0, st1)
+
+    VAR
+      -- program counter del cliente
+      state: {arrive, waiting, get_token, wash_laundry, out};
+      -- scelta della stazione:
+        -- -1 = nessuna stazione scelta
+        -- 0  = scelgo stazione 0
+        -- 1  = scelgo stazione 1 
+      choose_station: -1..1;
+      -- disponibilità delle stazioni:
+        -- 0 = nessuna stazione disponibile (FALSE)
+        -- 1 = stazione disponibile (TRUE)
+      available: {0,1};
+
+    ASSIGN
+
+      init(state) := arrive;
+      next(state) :=
+      case
+          -- se è il mio turno e sono nello stato "arrive" e ci sono stazioni disponibili, vado nello stato successivo
+          (scheduler = id) & (state = arrive) & (available = 1)              : waiting;
+          -- se sono nello stato "waiting", scelgo la stazione 0 e il cliente della stazione 0 sono io (id), ottengo il token
+          (state = waiting) & (choose_station = 0) & (st0.customer = id)     : get_token;
+          -- se sono nello stato "waiting", scelgo la stazione 1 e il cliente della stazione 1 sono io (id), ottengo il token
+          (state = waiting) & (choose_station = 1) & (st1.customer = id)     : get_token;
+          -- dopo aver preso il token, il cliente lava la biancheria
+          (state = get_token)                                                : wash_laundry;
+          -- dopo aver finito il lavaggio, il cliente esce dal negozio
+          (state = wash_laundry)                                             : out;
+          TRUE                                                               : state;
+      esac;
+
+      -- inizialmente non è scelta nessuna stazione
+      init(choose_station) := -1;
+      next(choose_station) :=
+      case
+          -- se entrambe le stazioni sono disponibili, il cliente sceglierà in modo non deterministico una delle 2
+          (state = waiting) & (st0.available = 1) & (st1.available = 1)   : {0,1};
+          -- se sono nello stato "waiting" e la stazione 0 è disponibile, allora il cliente sceglierà st0
+          (state = waiting) & (st0.available = 1)                         : 0;
+          -- se sono nello stato "waiting" e la stazione 1 è disponibile, allora il cliente sceglierà st1
+          (state = waiting) & (st1.available = 1)                         : 1;
+          TRUE                                                            : choose_station;
+
+      esac;
+
+      -- inizialmente non ci sono stazioni disponibili
+      init(available) := 0;
+      next(available) :=
+      case
+          (st0.available = 1)   : 1;
+          (st1.available = 1)   : 1;
+          TRUE                  : available; 
+      esac;
+
+
+
+
+----------------------------------------MODULE STATION------------------------------------------------
+
+--  start:
+--        int allocate(){
+--  sem:     P(nfree);
+--  l0:      int i=0; 
+--  while:   while(i < NMACHINES){
+--  l1t:       if (available[i] == TRUE)    
+--  l2f:           available[i] = FALSE;    
+--  ret:          return i;
+--  l3:        i++;
+--          }
+--        }
+--  end
+
+-- Inizialmente le stazioni sono entrambe libere. Quando un cliente entrerà nel negozio ne sceglierà una qualsiasi.
+-- Una volta scelta la stazione essa sarà occupata, verrà settata a FALSE (0), e rilascierà il token 
+-- per permettere al cliente di usare la lavatrice allocata. 
+-- Quando il program counter tornerà a "start", la stazione sarà libera e il valore di disponibilità della stazione 
+-- ritornerà a TRUE (1).
+
+
+  MODULE station(id, NMACHINES, scheduler, c0, c1, c2, central_pc)
+   
+    VAR
+      -- program counter delle stazioni
+      pc: {start, sem, l0, while, l1t,l2f, ret, l3, end};
+      -- variabile che indica la disponibilità delle stazioni
+      available: {0,1};
+      -- variabile che indica l'id del cliente
+      -- -1 = nessun cliente
+      -- 0,1,2 = cliente 0,1,2
+      customer: -1..2;
+      -- variabile contatore delle lavatrici allocate
+      i: 0..NMACHINES;
+
+
+    ASSIGN
+
+      init(pc) := start;
+      next(pc) :=
+      case
+          -- se sono nello stato "start" e mi è stato assegnato un cliente, vado vanti
+          (scheduler = id) & (pc = start) & (customer = 0 | customer = 1 | customer = 2)      : sem;
+          -- se ci sono lavatrici disponibili vado avanti
+          (scheduler = id) & (pc = sem) & (central_pc.nfree > 0)                              : l0;
+          -- se sono nello stato "l0", vado nel while
+          (scheduler = id) & (pc = l0)                                                        : while;
+          -- valuto la condizione del while, se è vera vado avanti
+          (scheduler = id) & (pc = while) & (i < NMACHINES)                                   : l1t;
+          -- valuto la condizione de while, se è falsa termino
+          (scheduler = id) & (pc = while) & !(i < NMACHINES)                                  : end;
+          -- se la lavatrice i-esima è libera, viene allocata
+          (scheduler = id) & (pc = l1t) & (i < NMACHINES) & (central_pc.available[i])         : l2f;
+          -- se invece la lavatrice i-esima NON è libera vado all'incremento
+          (scheduler = id) & (pc = l1t) & (i < NMACHINES) & (!central_pc.available[i])        : l3;
+          -- se sono nello stato "l2f", la lavatrice è stata allocata, allora vado nello stato "ret"
+          (scheduler = id) & (pc = l2f)                                                       : ret;
+          -- se sono nello stato "ret", vado avanti nello stato "end"
+          (scheduler = id) & (pc = ret)                                                       : end;
+          -- se sono nello stato "l3" (i++), ricontrollo il while
+          (scheduler = id) & (pc = l3)                                                        : while;
+          -- se sono nello stato "while" e i è maggiore di NMACHINES, salto il while e vado ad "end"
+          (scheduler = id) & (pc = while) & (i > NMACHINES)                                   : end;
+          -- se sono nello stato "end", ritorno allo stato "start"
+          (scheduler = id) & (pc = end)                                                       : start;
+          TRUE                                                                                : pc;
+      esac;
+
+
+      -- inizializzazione delle stazioni disponibili
+      init(available) := 1;
+      next(available) :=
+      case
+          -- se il program counter è in uno stato diverso da "start", 
+          -- allora la stazione è occupata e la disponibilità è 0
+          (pc != start)   : 0;
+          TRUE            : available; 				
+      esac;
+
+
+      -- inizializzazione dei clienti
+      init(customer) := -1;
+      next(customer) :=
+      case
+          -- se la stazione scelta dal customer 0 corrisponde al mio id, allorà servirò il c0
+          (pc = start) & (c0.choose_station = id)  : 0;
+          -- se la stazione scelta dal customer 1 corrisponde al mio id, allorà servirò il c1
+          (pc = start) & (c1.choose_station = id)  : 1;
+          -- se la stazione scelta dal customer 2 corrisponde al mio id, allorà servirò il c2
+          (pc = start) & (c2.choose_station = id)  : 2;
+          -- se il program counter punta a "end" non servirò nessun cliente
+          (pc = end)                               : -1;
+          TRUE                                     : customer;
+      esac;
+
+
+      -- inizializzazione della variabile contatore
+      init(i) := 0;
+      next(i) := 
+      case
+          -- se sono in l0(int i = 0), i avrà valore uguale a 0
+          (scheduler = id) & (pc = l0)            : 0;
+          -- se sono in l3(i++) e i = 0, allora i avrà valore finale 1
+          (scheduler = id) & (pc = l3) & (i = 0)  : i+1;
+          -- se sono in l3(i++) e i = 1, allora i avrà valore finale 2
+          (scheduler = id) & (pc = l3) & (i = 1)  : i+1;
+          TRUE                                    : i;
+      esac;
+
+
+
+------------------------------------MODULE CENTRAL COMPUTER--------------------------------------------
+
+--  start:
+--        void release(int machine) 
+--          {  
+--     l0:    available[machine] = TRUE;   
+--     l1:    V(nfree);                    
+--          }
+
+-- Il computer centrale ha il compito di gestire la release delle lavatrici.
+-- La scelta delle lavatrici su cui effettuare la release ricade su quelle che si trovano nello stato di "end", 
+-- ma nel caso ci fossero più lavatrici disponibili, verrà rilasciata per prima quella con l'id più basso.
+
+
+
+  MODULE central_computer(id, NMACHINES, scheduler, st0, st1, wm0, wm1)
+    
+    VAR
+      -- program counter cel computer centrale
+      pc: {start, l0, l1};
+      -- variabile che indica le lavatrici
+      washing_machine : -1..1;
+      -- array per il numero di lavatrici disponibili
+      available: array 0..(NMACHINES - 1) of boolean;           
+      -- semaforo contatore
+      nfree: 0..NMACHINES; 
+
+    ASSIGN
+
+      init(pc) := start;
+      next(pc) :=
+      case
+        -- il computer centrale attende che una delle due lavatrice si liberi
+          (scheduler = id) & (pc = start) & (washing_machine = 0 | washing_machine = 1)  : l0;
+        -- se sono nello stato "l0", una lavatrice viene rilasciata e passo allo stato successivo
+          (scheduler = id) & (pc = l0)                                                   : l1;
+        -- viene incrementato il semaforo della lavatrici libere(nfree)
+          (scheduler = id) & (pc = l1)                                                   : start;
+          TRUE                                                                           : pc;
+      esac;
+
+
+      -- lavatrice che ha terminato il turno di lavaggio
+      init(washing_machine) := -1;
+      next(washing_machine) :=
+      case
+        -- la lavatrice 0 ha terminato il lavaggio e attende la "release"
+          (wm0.pc = end)    : 0;
+        -- la lavatrice 1 ha terminato il lavaggio e attende la "release"
+          (wm1.pc = end)    : 1;
+          TRUE              : washing_machine;		
+      esac;
+
+
+      -- inizializzazione della lavatrice "wm0"
+      init(available[0]) := TRUE;
+      next(available[0]) :=
+      case
+          -- se la lavatrice scelta per la release è la wm0 e sono nello stato l0, allora la wm0 diventa disponibile(TRUE)
+          (scheduler = id) & (pc = l0) & (washing_machine = 0)       : TRUE;
+          -- se il turno è della stazione 0 e la variabile "i" vale 0 e la st0 si trova nello stato "l2f",
+          -- allora la lavatrice 0 diventa occupata
+          (scheduler = st0.id) & (st0.i = 0) & (st0.pc = l2f)        : FALSE;
+          -- se il turno è della stazione 1 e la variabile "i" vale 0 e la st1 si trova nello stato "l2f",
+          -- allora la lavatrice 0 diventa occupata
+          (scheduler = st1.id) & (st1.i = 0) & (st1.pc = l2f)        : FALSE;
+          TRUE                                                       : available[0];
+      esac;
+
+
+      -- inizializzazione della lavatrice "wm1"
+      init(available[1]) := TRUE;
+      next(available[1]) :=
+      case
+          -- se la lavatrice scelta per la release è la wm1 e sono nello stato l0, allora la wm1 diventa disponibile(TRUE)
+          (scheduler = id) & (pc = l0) & (washing_machine = 1)       : TRUE;
+          -- se il turno è della stazione 0 e la variabile "i" vale 1 e la st0 si trova nello stato "l2f",
+          -- allora la lavatrice 1 diventa occupata
+          (scheduler = st0.id) & (st0.i = 1) & (st0.pc = l2f)       : FALSE;
+          -- se il turno è della stazione 1 e la variabile "i" vale 1 e la st1 si trova nello stato "l2f",
+          -- allora la lavatrice 1 diventa occupata
+          (scheduler = st1.id) & (st1.i = 1) & (st1.pc = l2f)       : FALSE;
+          TRUE                                                      : available[1];
+      esac;
+
+      -- inizializzazione del semaforo "nfree"
+      init(nfree) := NMACHINES;
+      next(nfree) := 
+      case
+          -- se sono nello stato "l1" e se il numero di nfree è minore di NMACHINES,
+          -- viene fatta una release sul semaforo e il umero di permessi viene incrementato di 1
+          (scheduler = id) & (pc = l1) & (nfree < NMACHINES)      : nfree + 1;
+          -- se il turno è della stazione 0 e sono nello stato "sem" della stazione e nfree > 0,
+          -- acquisisco un permesso e decremento il semaforo di 1
+          (scheduler = st0.id) & (st0.pc = sem) & (nfree > 0)     : nfree - 1;
+          -- se il turno è della stazione 1 e sono nello stato "sem" della stazione e nfree > 0,
+          -- acquisisco un permesso e decremento il semaforo di 1
+          (scheduler = st1.id) & (st1.pc = sem) & (nfree > 0)     : nfree - 1;
+          TRUE                                                    : nfree;
+      esac;
+
+
+
+
+
+
+
+
+
+
+
+
